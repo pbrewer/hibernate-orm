@@ -24,15 +24,19 @@
  */
 package org.hibernate.persister.collection;
 import java.io.Serializable;
-
-import org.jboss.logging.Logger;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import org.hibernate.FlushMode;
 import org.hibernate.HibernateException;
+import org.hibernate.collection.spi.PersistentCollection;
+import org.hibernate.engine.spi.CollectionKey;
 import org.hibernate.engine.spi.SessionImplementor;
 import org.hibernate.internal.AbstractQueryImpl;
 import org.hibernate.internal.CoreMessageLogger;
 import org.hibernate.loader.collection.CollectionInitializer;
+import org.jboss.logging.Logger;
 
 /**
  * A wrapper around a named query.
@@ -52,7 +56,8 @@ public final class NamedQueryCollectionInitializer implements CollectionInitiali
 		this.persister = persister;
 	}
 
-	public void initialize(Serializable key, SessionImplementor session)
+	@Override
+  public void initialize(Serializable key, SessionImplementor session)
 	throws HibernateException {
 
         LOG.debugf("Initializing collection: %s using named query: %s", persister.getRole(), queryName);
@@ -69,9 +74,27 @@ public final class NamedQueryCollectionInitializer implements CollectionInitiali
 		else {
 			query.setParameter( 0, key, persister.getKeyType() );
 		}
-		query.setCollectionKey( key )
+    List<?> list = query.setCollectionKey(key)
 				.setFlushMode( FlushMode.MANUAL )
 				.list();
+
+    // See HHH-3273
+    // Uh, how 'bout we save the collection for later retrieval?
+    CollectionKey collectionKey = new CollectionKey(persister, key, persister.getOwnerEntityPersister().getEntityMode());
+    Set keySet = new HashSet(session.getPersistenceContext().getCollectionsByKey().keySet());
+    for (Object object : keySet) {
+      if (collectionKey.equals(object)) {
+        PersistentCollection persistentCollection = session.getPersistenceContext().getCollection(collectionKey);
+        Serializable[] serializables = new Serializable[list.size()];
+        for (int i = 0; i < list.size(); i++) {
+          serializables[i] = persister.getElementType().disassemble(list.get(i), session, persistentCollection.getOwner());
+        }
+        persistentCollection.initializeFromCache(persister, serializables, persistentCollection.getOwner());
+        persistentCollection.setSnapshot(key, persistentCollection.getRole(), serializables);
+        persistentCollection.afterInitialize();
+        session.getPersistenceContext().getCollectionEntry(persistentCollection).postInitialize(persistentCollection);
+      }
+    }
 
 	}
 }
